@@ -1,0 +1,23 @@
+# --- Core Agent Framework ---
+langchain>=0.2.11
+langgraph>=0.1.10
+langchain-openai>=0.1.7
+langchain_openai
+# --- App Framework ---
+streamlit>=1.38.0
+
+# --- Database ---
+psycopg2-binary>=2.9.9
+
+# --- Data Processing (for generated code) ---
+pandas>=2.2.2
+pyspark>=3.5.2
+
+# --- Utility & Sandbox ---
+python-dotenv>=1.0.1
+asttokens>=2.4.1   # helps AST parsing for validation
+
+# --- Optional (Logging / Display) ---
+rich>=13.7.1
+
+graphviz
