@@ -3,12 +3,8 @@ import pandas as pd
 import json
 import sys
 import os
-from dotenv import load_dotenv
-
-# --------------------------
-# Load environment variables
-# --------------------------
-load_dotenv()
+import importlib.util
+import tempfile
 
 # Add parent folder to sys.path so 'utils' can be imported
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -30,8 +26,7 @@ st.title("💬 Agentic Code Generator (LLM-driven STTM)")
 # --------------------------
 # Initialize session state
 # --------------------------
-for key in ["sttm_generated", "final_sttm", "generated_code",
-            "etl_engine", "load_type"]:
+for key in ["sttm_generated", "final_sttm", "generated_code", "etl_engine", "load_type"]:
     if key not in st.session_state:
         st.session_state[key] = None
 
@@ -56,13 +51,14 @@ target_schema = st.selectbox("Target Schema", schemas, key="tgt_schema")
 source_tables = list_tables(source_schema)
 target_tables = list_tables(target_schema)
 source_table = st.selectbox("Source Table", source_tables, key="src_table")
-target_table = st.selectbox("Target Table", target_tables, key="tgt_table")
 
 # --------------------------
 # Load Type Selection
 # --------------------------
 load_type = st.selectbox("Load Type", ["Full", "Incremental"], key="load_type")
+##st.session_state.load_type = load_type
 
+target_table = st.selectbox("Target Table", target_tables, key="tgt_table")
 
 # --------------------------
 # Table Preview Function
@@ -155,7 +151,7 @@ if st.session_state.sttm_generated or st.session_state.final_sttm:
         st.error("⚠️ Invalid JSON. Please fix before generating code.")
 
 # --------------------------
-# Generate ETL Code (always from latest STTM)
+# Generate ETL Code
 # --------------------------
 if st.button("🚀 Generate Python ETL Code") and st.session_state.final_sttm:
     codegen_state = {
@@ -163,7 +159,7 @@ if st.button("🚀 Generate Python ETL Code") and st.session_state.final_sttm:
         "table_type": table_type,
         "scd_type": scd_type,
         "etl_engine": st.session_state.etl_engine,
-        "load_type": load_type
+        "load_type":load_type
     }
     with st.spinner("Generating full Python ETL code..."):
         codegen_state = codegen_node_func(codegen_state, preview=False)
@@ -171,27 +167,37 @@ if st.button("🚀 Generate Python ETL Code") and st.session_state.final_sttm:
     st.success("✅ Python ETL code generated and ready for backend execution.")
 
 # --------------------------
-# Display Generated Code
+# Show Generated Code Always
 # --------------------------
 if st.session_state.generated_code:
-    st.markdown("### Generated ETL Code")
+    st.subheader("Generated Python ETL Code")
     st.code(st.session_state.generated_code, language="python")
 
 # --------------------------
-# Execute ETL Backend
+# Backend Execution (Step 2: Dynamic Import)
 # --------------------------
 if st.session_state.generated_code:
     if st.button("🚀 Execute ETL & Write to Target Table"):
-        with st.spinner("Running ETL job on backend..."):
+        with st.spinner("Running ETL job..."):
             try:
-                local_vars = {}
-                exec(st.session_state.generated_code, globals(), local_vars)
+                # Save generated code to temp file
+                with tempfile.NamedTemporaryFile("w", delete=False, suffix=".py") as tmpfile:
+                    tmpfile.write(st.session_state.generated_code)
+                    temp_path = tmpfile.name
+
+                # Dynamically import the module
+                spec = importlib.util.spec_from_file_location("generated_etl", temp_path)
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+
+                # Call the function by name
                 func_name = f"{source_schema}_{target_schema}_{target_table}".lower()
-                # Execute ETL in memory
-                df_preview = local_vars[func_name]()  # Pass engine inside generated code
+                df_result = getattr(module, func_name)(engine)
+
                 st.success(f"✅ Data successfully written to {target_schema}.{target_table}")
-                st.markdown("### Sample Target Data After ETL")
-                st.dataframe(df_preview.head(20))
+                st.markdown("### Sample Data Preview")
+                st.dataframe(df_result.head(20))
+
             except Exception as e:
                 st.error(f"❌ Error during ETL execution: {e}")
 
