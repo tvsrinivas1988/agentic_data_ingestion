@@ -40,7 +40,13 @@ def generate_code(state):
     # Construct prompt for LLM
     prompt = f"""
 You are a senior data engineer. Generate Python code to transform data 
-from source table to target table using the STTM below.
+from source table to target table using the STTM below. 
+-INT schema tables are always SCD1 for dimensions
+-DWH Schema tables are always SCD2 for dimensions.
+-Process_ind in the INT Schema will be I for new records & U for updated records & D for deleted records.
+-When the source schema is INT and target schema is DWH pick up records which have processind in I and U.
+-DWH tables will have is_active column which is a flag .Its set to Y for currently active records and N for inactive records.
+-EFF_START_DT & EFF_END_DT are the dates in between which the records were active/currently active.
 
 STTM:
 {sttm}

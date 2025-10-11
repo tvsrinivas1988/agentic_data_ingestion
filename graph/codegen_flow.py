@@ -51,6 +51,7 @@ def generate_sttm_node(state):
             "You must only use the target columns that exist in the provided schema metadata. "
             "Do not invent or hallucinate new target columns. "
             "You may, however, infer transformations or use constants for audit fields like timestamps."
+    
         )),
         HumanMessage(content=f"""
         Given:
@@ -72,9 +73,16 @@ def generate_sttm_node(state):
 
         Rules:
         - Map only columns present in the target list.
-        - Use similar names for direct mappings (case-insensitive).
-        - For audit fields like 'created_at', 'updated_at', 'load_ts', use CURRENT_TIMESTAMP.
+        - Use similar names for direct mappings (case-insensitive) except fou audit columns.
+        - For audit fields like 'audit_insrt_dt', 'audit_updt_dt', 'load_ts', use CURRENT_TIMESTAMP.
         - Output must be valid JSON (list of mappings).
+        -INT schema tables are always SCD1 for dimensions
+        -DWH Schema tables are always SCD2 for dimensions.
+        -Process_ind in the INT Schema will be I for new records & U for updated records & D for deleted records.
+        -When the source schema is INT and target schema is DWH pick up records which have processind in I and U.
+        -DWH tables will have is_active column which is a flag .Its set to Y for currently active records and N for inactive records.
+        -EFF_START_DT & EFF_END_DT are the dates in between which the records were active/currently active.
+
         """)
     ]
 
