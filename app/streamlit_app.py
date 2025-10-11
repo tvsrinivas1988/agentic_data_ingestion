@@ -3,11 +3,11 @@ import pandas as pd
 import json
 import sys
 import os
-import importlib.util
 import tempfile
+import importlib.util
+from dotenv import load_dotenv
 
-# Add parent folder to sys.path so 'utils' can be imported
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# Add parent folder for imports
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from utils.db import (
@@ -20,199 +20,160 @@ from utils.db import (
 )
 from graph.codegen_flow import generate_sttm_node, codegen_node_func
 
+# ---------------------------------------------
+# Streamlit UI Setup
+# ---------------------------------------------
 st.set_page_config(page_title="Agentic Code Generator", layout="wide")
 st.title("💬 Agentic Code Generator (LLM-driven STTM)")
 
-# --------------------------
+# ---------------------------------------------
 # Initialize session state
-# --------------------------
+# ---------------------------------------------
 for key in ["sttm_generated", "final_sttm", "generated_code", "etl_engine", "load_type"]:
     if key not in st.session_state:
         st.session_state[key] = None
 
-# --------------------------
-# Table Type + SCD
-# --------------------------
+# ---------------------------------------------
+# Step 1: Basic Setup
+# ---------------------------------------------
 table_type = st.selectbox("Table Type", ["Fact Table", "Dimension Table"])
 scd_type = None
 if table_type == "Dimension Table":
     scd_type = st.selectbox("SCD Type", ["SCD1", "SCD2", "SCD3"])
 
-# --------------------------
-# Schema Selection
-# --------------------------
 schemas = list_schemas()
-source_schema = st.selectbox("Source Schema", schemas, key="src_schema")
-target_schema = st.selectbox("Target Schema", schemas, key="tgt_schema")
-
-# --------------------------
-# Table Selection
-# --------------------------
+source_schema = st.selectbox("Source Schema", schemas)
+target_schema = st.selectbox("Target Schema", schemas)
 source_tables = list_tables(source_schema)
 target_tables = list_tables(target_schema)
-source_table = st.selectbox("Source Table", source_tables, key="src_table")
 
-# --------------------------
-# Load Type Selection
-# --------------------------
-load_type = st.selectbox("Load Type", ["Full", "Incremental"], key="load_type")
+source_table = st.selectbox("Source Table", source_tables)
+target_table = st.selectbox("Target Table", target_tables)
+
+load_type = st.selectbox("Load Type", ["Full", "Incremental"])
 ##st.session_state.load_type = load_type
 
-target_table = st.selectbox("Target Table", target_tables, key="tgt_table")
-
-# --------------------------
-# Table Preview Function
-# --------------------------
-def render_table_preview(schema_name, table_name):
-    preview = preview_table(schema_name, table_name)
-    columns = [col["column_name"] for col in preview["columns"]]
-    if preview["sample_rows"]:
-        st.dataframe(pd.DataFrame(preview["sample_rows"]), use_container_width=True)
-    else:
-        st.table(pd.DataFrame(columns=columns))
-    return len(preview["sample_rows"])
-
-col1, col2 = st.columns(2)
-with col1:
-    st.markdown(f"**Source Table: {source_schema}.{source_table}**")
-    src_row_count = render_table_preview(source_schema, source_table)
-with col2:
-    st.markdown(f"**Target Table: {target_schema}.{target_table}**")
-    _ = render_table_preview(target_schema, target_table)
-
-# --------------------------
-# ETL Engine Selection
-# --------------------------
-etl_engine_option = st.radio(
-    "Choose ETL engine (or Auto based on row count):",
-    ["Pandas", "PySpark", "Auto"],
-    index=2
-)
-if etl_engine_option == "Auto":
-    etl_engine = "Pandas" if src_row_count < 1_000_000 else "PySpark"
-else:
-    etl_engine = etl_engine_option
-st.session_state.etl_engine = etl_engine
-st.info(f"Selected ETL Engine: {etl_engine}")
-
-# --------------------------
-# Initialize SQLAlchemy engine
-# --------------------------
-engine = get_engine()
-
-# --------------------------
-# Check for existing code
-# --------------------------
-existing_code = get_existing_code(source_schema, source_table, target_schema, target_table, engine)
-if existing_code:
-    st.info("⚡ Existing ETL code found. Loading into editor...")
-    st.session_state.generated_code = existing_code["generated_code"]
-    st.session_state.etl_engine = existing_code["etl_engine"]
-    if not st.session_state.final_sttm:
-        st.session_state.final_sttm = {
+# ---------------------------------------------
+# Step 2: Generate STTM
+# ---------------------------------------------
+if st.button("🤖 Generate Draft STTM (LLM + Audit Columns)"):
+    with st.spinner("Generating STTM using LLM..."):
+        state = {
             "source_schema": source_schema,
             "source_table": source_table,
             "target_schema": target_schema,
-            "target_table": target_table,
-            "mappings": []
+            "target_table": target_table
         }
-
-# --------------------------
-# Generate Draft STTM
-# --------------------------
-if st.button("🤖 Generate Draft STTM (LLM + Audit Columns)"):
-    state = {
-        "source_schema": source_schema,
-        "source_table": source_table,
-        "target_schema": target_schema,
-        "target_table": target_table
-    }
-    with st.spinner("Generating draft STTM..."):
         state = generate_sttm_node(state)
-        draft_sttm = state.get("sttm", {})
-        if draft_sttm:
-            st.session_state.sttm_generated = draft_sttm
-            st.session_state.final_sttm = draft_sttm
-        else:
-            st.error("⚠️ STTM generation failed.")
+        draft_sttm = state.get("sttm")
 
-# --------------------------
-# Display and Edit STTM
-# --------------------------
-if st.session_state.sttm_generated or st.session_state.final_sttm:
+        if draft_sttm:
+            st.session_state.final_sttm = draft_sttm
+            st.session_state.sttm_generated = True
+            st.success("✅ STTM generated successfully!")
+        else:
+            st.error("⚠️ Failed to generate STTM.")
+
+# ---------------------------------------------
+# Step 3: Show & Edit STTM (only after generation)
+# ---------------------------------------------
+if st.session_state.sttm_generated:
+    st.subheader("📘 Review / Edit Generated STTM")
     edited_sttm_str = st.text_area(
-        "Review/Edit STTM JSON (Audit & Process Columns Included)",
+        "STTM JSON",
         json.dumps(st.session_state.final_sttm, indent=2),
-        height=500
+        height=400
     )
+
     try:
         st.session_state.final_sttm = json.loads(edited_sttm_str)
     except Exception:
-        st.error("⚠️ Invalid JSON. Please fix before generating code.")
+        st.error("⚠️ Invalid JSON. Please correct before proceeding.")
 
-# --------------------------
-# Generate ETL Code
-# --------------------------
-if st.button("🚀 Generate Python ETL Code") and st.session_state.final_sttm:
-    codegen_state = {
-        "sttm": st.session_state.final_sttm,
-        "table_type": table_type,
-        "scd_type": scd_type,
-        "etl_engine": st.session_state.etl_engine,
-        "load_type":load_type
-    }
-    with st.spinner("Generating full Python ETL code..."):
-        codegen_state = codegen_node_func(codegen_state, preview=False)
-        st.session_state.generated_code = codegen_state.get("code")
-    st.success("✅ Python ETL code generated and ready for backend execution.")
+# ---------------------------------------------
+# Step 4: Generate ETL Code (after STTM is ready)
+# ---------------------------------------------
+if st.session_state.final_sttm:
+    if st.button("🚀 Generate Python ETL Code"):
+        with st.spinner("Generating ETL code using .env settings..."):
+            # Load .env for DB details
+            load_dotenv()
+            db_user = os.getenv("DB_USER")
+            db_host = os.getenv("DB_HOST")
+            db_port = os.getenv("DB_PORT")
+            db_name = os.getenv("DB_NAME")
 
-# --------------------------
-# Show Generated Code Always
-# --------------------------
+            # Pass all info to codegen
+            codegen_state = {
+                "sttm": st.session_state.final_sttm,
+                "table_type": table_type,
+                "scd_type": scd_type,
+                "etl_engine": "Pandas",
+                "load_type": load_type,
+                "db_env": {
+                    "user": db_user,
+                    "host": db_host,
+                    "port": db_port,
+                    "database": db_name
+                }
+            }
+
+            codegen_state = codegen_node_func(codegen_state, preview=False)
+            st.session_state.generated_code = codegen_state.get("code")
+
+            if st.session_state.generated_code:
+                st.success("✅ ETL code generated successfully!")
+                st.code(st.session_state.generated_code, language="python")
+
+# ---------------------------------------------
+# Step 5: Save Code & STTM to Database
+# ---------------------------------------------
 if st.session_state.generated_code:
-    st.subheader("Generated Python ETL Code")
-    st.code(st.session_state.generated_code, language="python")
-
-# --------------------------
-# Backend Execution (Step 2: Dynamic Import)
-# --------------------------
-if st.session_state.generated_code:
-    if st.button("🚀 Execute ETL & Write to Target Table"):
-        with st.spinner("Running ETL job..."):
-            try:
-                # Save generated code to temp file
-                with tempfile.NamedTemporaryFile("w", delete=False, suffix=".py") as tmpfile:
-                    tmpfile.write(st.session_state.generated_code)
-                    temp_path = tmpfile.name
-
-                # Dynamically import the module
-                spec = importlib.util.spec_from_file_location("generated_etl", temp_path)
-                module = importlib.util.module_from_spec(spec)
-                spec.loader.exec_module(module)
-
-                # Call the function by name
-                func_name = f"{source_schema}_{target_schema}_{target_table}".lower()
-                df_result = getattr(module, func_name)(engine)
-
-                st.success(f"✅ Data successfully written to {target_schema}.{target_table}")
-                st.markdown("### Sample Data Preview")
-                st.dataframe(df_result.head(20))
-
-            except Exception as e:
-                st.error(f"❌ Error during ETL execution: {e}")
-
-# --------------------------
-# Persist Generated Code
-# --------------------------
-if st.session_state.generated_code:
-    if st.button("💾 Persist Generated ETL Code"):
+    if st.button("💾 Persist STTM + ETL Code to Database"):
         try:
+            engine = get_engine()
             save_generated_code(
-                source_schema, source_table, target_schema, target_table,
-                table_type, scd_type, st.session_state.etl_engine,
-                st.session_state.generated_code,
-                engine
-            )
-            st.success("✅ Generated code saved to database.")
+            engine,
+            source_schema,
+            target_schema,
+            source_table,
+            target_table,
+            st.session_state["generated_code"],
+            st.session_state["final_sttm"],
+            table_type,
+            scd_type,
+            st.session_state["etl_engine"]
+        )
+            st.success("✅ STTM and ETL Code saved to database successfully.")
         except Exception as e:
-            st.error(f"❌ Error saving code: {e}")
+            st.error(f"❌ Error while saving to database: {e}")
+
+# ---------------------------------------------
+# Step 6: Execute Saved Code (from DB)
+# ---------------------------------------------
+if st.button("▶️ Execute Saved ETL from DB"):
+    try:
+        engine = get_engine()
+        existing_code = get_existing_code(source_schema, source_table, target_schema, target_table, engine)
+        if not existing_code:
+            st.error("⚠️ No saved code found. Please generate and save first.")
+        else:
+            code_to_run = existing_code["generated_code"]
+
+            # Write code to temporary file for import
+            with tempfile.NamedTemporaryFile("w", delete=False, suffix=".py") as tmpfile:
+                tmpfile.write(code_to_run)
+                temp_path = tmpfile.name
+
+            spec = importlib.util.spec_from_file_location("generated_etl", temp_path)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+
+            func_name = f"{source_schema}_{target_schema}_{target_table}".lower()
+            df_result = getattr(module, func_name)(engine)
+
+            st.success(f"✅ ETL executed successfully for {target_schema}.{target_table}")
+            st.dataframe(df_result.head(20))
+
+    except Exception as e:
+        st.error(f"❌ Error during ETL execution: {e}")

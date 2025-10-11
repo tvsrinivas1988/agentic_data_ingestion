@@ -143,31 +143,75 @@ def get_existing_code(src_schema, src_table, tgt_schema, tgt_table, engine):
         }
 
 
-def save_generated_code(src_schema, src_table, tgt_schema, tgt_table,
-                        table_type, scd_type, etl_engine, code, engine):
-    """Insert/update generated ETL code in DB (requires engine)."""
+import json
+import re
+from sqlalchemy import text
+
+# --- Cleaning function ---
+def clean_generated_code(code: str) -> str:
+    """
+    Cleans generated code by removing markdown artifacts and normalizing formatting.
+    """
+    if not code:
+        return ""
+
+    code = code.strip()
+    code = code.replace("```python", "").replace("```", "")
+    code = code.strip("\n ").replace("\\n", "\n")
+    return code
+
+
+# --- Validation function ---
+def validate_generated_code(code: str, src_schema: str, tgt_schema: str, tgt_table: str):
+    """
+    Ensures code is syntactically valid and follows naming conventions.
+    """
+    # Validate syntax
+    try:
+        compile(code, "<string>", "exec")
+    except SyntaxError as e:
+        raise ValueError(f"Generated code has syntax error at line {e.lineno}: {e.msg}")
+
+    # Validate function name format
+    expected_func_prefix = f"def {src_schema}_{tgt_schema}_{tgt_table}"
+    if expected_func_prefix not in code:
+        raise ValueError(f"Function name must follow pattern: {expected_func_prefix}")
+
+
+# --- Persist function ---
+def save_generated_code(engine, src_schema, tgt_schema,source_table, tgt_table, code, sttm,table_type,scd_type,etl_engine):
+    """
+    Persists the cleaned and validated code along with its STTM into the database.
+    """
+    from sqlalchemy import text
+
+    clean_code = clean_generated_code(code)
+    validate_generated_code(clean_code, src_schema, tgt_schema, tgt_table)
+
+    sttm_json = json.dumps(sttm) if not isinstance(sttm, str) else sttm
+
     query = text("""
-        INSERT INTO audit.etl_code_store
-        (source_schema, source_table, target_schema, target_table,
-         table_type, scd_type, etl_engine, generated_code)
-        VALUES (:src_schema,:src_table,:tgt_schema,:tgt_table,
-                :table_type,:scd_type,:etl_engine,:code)
-        ON CONFLICT (source_schema, source_table, target_schema, target_table)
+        INSERT INTO audit.etl_code_store (source_schema, target_schema, source_table, target_table, generated_code, sttm_json,table_type,scd_type, etl_engine)
+        VALUES (:src_schema, :tgt_schema, :source_table , :tgt_table, :code, :sttm,:table_type,:scd_type,:etl_engine)
+        ON CONFLICT (source_schema, target_schema, target_table)
         DO UPDATE SET generated_code = EXCLUDED.generated_code,
                       etl_engine = EXCLUDED.etl_engine,
                       table_type = EXCLUDED.table_type,
                       scd_type = EXCLUDED.scd_type,
-                      last_modified = CURRENT_TIMESTAMP
+                      last_modified = CURRENT_TIMESTAMP,
+                      source_table  = EXCLUDED.source_table,
+                      sttm_json  = EXCLUDED.sttm_json;
     """)
-    with engine.connect() as conn:
+
+    with engine.begin() as conn:
         conn.execute(query, {
             "src_schema": src_schema,
-            "src_table": src_table,
             "tgt_schema": tgt_schema,
+            "source_table":source_table,
             "tgt_table": tgt_table,
-            "table_type": table_type,
-            "scd_type": scd_type,
-            "etl_engine": etl_engine,
-            "code": code
+            "code": clean_code,
+            "sttm": sttm_json,
+            "table_type":table_type,
+            "scd_type":scd_type,
+            "etl_engine":etl_engine
         })
-        conn.commit()
