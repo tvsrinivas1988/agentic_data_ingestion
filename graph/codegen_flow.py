@@ -105,68 +105,63 @@ def generate_sttm_node(state):
 # -------------------------
 # Code Generation Node
 # -------------------------
+from langchain_openai import ChatOpenAI
+from langchain.schema import SystemMessage, HumanMessage
+import json
+
 def codegen_node_func(state, preview=False):
     """
-    Generate Python ETL code from STTM.
-    The generated code is ready to be executed on backend.
+    Generates Python ETL code dynamically using the latest STTM mapping.
     """
-    import_statements = set()
-    
+    import_statements = set(["import pandas as pd"])
     sttm = state.get("sttm", {})
     etl_engine = state.get("etl_engine", "Pandas")
-    load_type = state.get("load_type", "Full")  # Full or Incremental
-    
+    load_type = state.get("load_type", "Full")
+
     src_schema = sttm.get("source_schema")
     src_table = sttm.get("source_table")
     tgt_schema = sttm.get("target_schema")
     tgt_table = sttm.get("target_table")
+
     func_name = f"{src_schema}_{tgt_schema}_{tgt_table}".lower()
-    
-    code_lines = []
 
-    if etl_engine == "Pandas":
-        import_statements.add("import pandas as pd")
-        import_statements.add("from datetime import datetime")
+    # ---- 🧠 Use the LLM to generate transformation logic dynamically ----
+    llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.1)
 
-        code_lines.append(f"def {func_name}(engine):")
-        code_lines.append(f"    # Read source table")
-        code_lines.append(f"    df = pd.read_sql('SELECT * FROM {src_schema}.{src_table}', engine)")
-        
-        # Apply mappings
-        code_lines.append(f"    # Apply mappings as per STTM")
-        for mapping in sttm.get("mappings", []):
-            tgt_col = mapping["target_column"]  # keep exact case
-            trans = mapping.get("transformation")
-            src_cols = mapping.get("source_columns", [])
-            
-            if not src_cols:
-                if trans == "current_timestamp":
-                    code_lines.append(f"    df['{tgt_col}'] = datetime.now()")
-                else:
-                    code_lines.append(f"    df['{tgt_col}'] = {trans}")
-            elif len(src_cols) == 1:
-                src_col = src_cols[0].split('.')[-1]
-                code_lines.append(f"    df['{tgt_col}'] = df['{src_col}']")
-            else:
-                cols = [c.split('.')[-1] for c in src_cols]
-                cols_str = ", ".join([f"'{c}'" for c in cols])
-                code_lines.append(f"    df['{tgt_col}'] = df[[{cols_str}]].astype(str).agg('_'.join, axis=1)")
-        
-        # Write to target
-        code_lines.append(f"    # Write to target table")
-        if not preview:
-            if load_type.lower() == "full":
-                if_exists_mode = "replace"
-            else:
-                if_exists_mode = "append"
-            code_lines.append(f"    df.to_sql('{tgt_table}', engine, schema='{tgt_schema}', if_exists='{if_exists_mode}', index=False)")
-            code_lines.append(f"    print('ETL job completed for {tgt_schema}.{tgt_table} ({load_type} Load)')")
-        
-        code_lines.append("    return df  # Always return df for inspection if needed")
+    # Make sure we use *actual* source & target columns from DB (avoid hallucination)
+    src_columns = state.get("source_columns", [])
+    tgt_columns = state.get("target_columns", [])
 
-    # Combine imports + code
-    code = "\n".join(sorted(import_statements)) + "\n\n" + "\n".join(code_lines)
-    state["code"] = code
+    sttm_json = json.dumps(sttm, indent=2)
+
+    prompt = f"""
+    You are a precise ETL code generator.
+    Generate a clean Python function using pandas that:
+    - Reads from table {src_schema}.{src_table}
+    - Applies transformations from this STTM: {sttm_json}
+    - Writes to table {tgt_schema}.{tgt_table}
+    - Only use these source columns: {src_columns}
+    - Only use these target columns: {tgt_columns}
+    - Load type is: {load_type}
+    - Use datetime.now() for current_timestamp if needed.
+    - No placeholders or mock data.
+    - Func_name is {func_name}
+    -Use the .env file to create database connection.
+
+    Output only valid executable Python code.
+    """
+
+    response = llm.invoke([
+        SystemMessage(content="You are a strict Python ETL code generator."),
+        HumanMessage(content=prompt)
+    ])
+
+    generated_code = response.content.strip()
+
+    # Attach generated code back to the state
+    state["code"] = generated_code
+    state["sttm_used_for_codegen"] = sttm  # keep reference for traceability
+
     return state
 
 # -------------------------
