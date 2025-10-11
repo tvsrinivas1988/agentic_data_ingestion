@@ -23,8 +23,8 @@ from graph.codegen_flow import generate_sttm_node, codegen_node_func
 # ---------------------------------------------
 # Streamlit UI Setup
 # ---------------------------------------------
-st.set_page_config(page_title="Agentic Code Generator", layout="wide")
-st.title("💬 Agentic Code Generator (LLM-driven STTM)")
+st.set_page_config(page_title="CodeFlow AI", layout="wide")
+st.title("💬 CodeFlow AI")
 
 # ---------------------------------------------
 # Initialize session state
@@ -150,7 +150,7 @@ if st.session_state.generated_code:
 
 # ---------------------------------------------
 # Step 6: Execute Saved Code (from DB)
-# ---------------------------------------------
+# --------------------------------------------- 
 if st.button("▶️ Execute Saved ETL from DB"):
     try:
         engine = get_engine()
@@ -170,10 +170,21 @@ if st.button("▶️ Execute Saved ETL from DB"):
             spec.loader.exec_module(module)
 
             func_name = f"{source_schema}_{target_schema}_{target_table}".lower()
-            df_result = getattr(module, func_name)(engine)
+            df_result = getattr(module, func_name)()
 
-            st.success(f"✅ ETL executed successfully for {target_schema}.{target_table}")
-            st.dataframe(df_result.head(20))
+            
+            if df_result is not None:
+                st.dataframe(df_result.head(20), use_container_width=True)
+                st.success(f"✅ ETL executed successfully for {target_schema}.{target_table}")
+            else:
+                st.info("ETL executed successfully. Fetching sample from target table...")
+                query = f"SELECT * FROM {target_schema}.{target_table} LIMIT 20"
+                df_result = pd.read_sql(query, engine)
+                st.dataframe(df_result, use_container_width=True)
+
+            # Clean up temp file
+            os.remove(temp_path)
+            
 
     except Exception as e:
         st.error(f"❌ Error during ETL execution: {e}")
