@@ -189,6 +189,7 @@ def codegen_node_func(state, preview=False):
     - Only use these source columns: {src_columns}
     - Only use these target columns: {tgt_columns}
     - Load type is: {load_type}
+    - Process_ind should be derived based on the rule  and assumed.
     - Primary key is present in STTM as pkey
     - Use datetime.now() for current_timestamp if needed.
     - No placeholders or mock data.
@@ -217,23 +218,7 @@ def codegen_node_func(state, preview=False):
     - Always use `with engine.begin() as conn:` for transactional operations.
     - Never use `with engine.connect()` without explicitly committing, since SQLAlchemy 2.x does not auto-commit.
     - Make sure that inserts done with pandas `.to_sql()` and manual updates both persist consistently.
-    - Include meaningful print/log messages after inserts or updates.
-    - Avoid looping through each row to run individual UPDATE statements.
-    - Instead, generate a single bulk UPDATE using a temporary staging table or CTE join pattern.
-    - Example approach:
-    1. Write updated data into a temporary table (like `#tmp_brand_master` or a temp schema).
-    2. Run a single SQL statement such as:
-
-        ```sql
-        UPDATE target_table
-        SET col1 = src.col1,
-            col2 = src.col2,
-            audit_updt_dt = CURRENT_TIMESTAMP
-        FROM int.brand_master AS target
-        JOIN tmp_brand_master AS src
-        ON target.brand_id = src.brand_id;
-        ```
-
+    
     ### Performance
     - Never query inside a per-row loop.
     - If you need to check for existing keys (e.g., brand_id), fetch all keys from the target table once and compare in-memory.
