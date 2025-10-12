@@ -1,5 +1,5 @@
 import json
-from utils.db import get_table_columns, get_connection
+from utils.db import get_table_columns, get_connection,list_schemas,list_tables
 from openai import OpenAI
 # -------------------------
 # STTM Generator Node
@@ -40,6 +40,9 @@ def generate_sttm_node(state):
     src_cols = [c["column_name"] for c in source_columns]
     tgt_cols = [c["column_name"] for c in target_columns]
 
+    # Include schema overview for context
+    all_schemas = {s: list_tables(s) for s in list_schemas()}
+
     # Build LLM model
     model = ChatOpenAI(model="gpt-4o-mini", temperature=0.2,api_key=os.getenv('OPENAI_API_KEY'))
 
@@ -51,12 +54,17 @@ def generate_sttm_node(state):
             "You must only use the target columns that exist in the provided schema metadata. "
             "Do not invent or hallucinate new target columns. "
             "You may, however, infer transformations or use constants for audit fields like timestamps."
-    
+            "Include join details if the column comes from another schema/table."
+            "Use the key 'join_logic' and 'lookup_table' for such cases."
+
         )),
         HumanMessage(content=f"""
         Given:
-        - Source table: `{src_schema}.{src_table}`
+        - Primary source table: `{src_schema}.{src_table}`
         - Target table: `{tgt_schema}.{tgt_table}`
+
+        Available schemas and tables:
+        {json.dumps(all_schemas, indent=2)}
 
         Source columns:
         {json.dumps(src_cols, indent=2)}
@@ -64,24 +72,50 @@ def generate_sttm_node(state):
         Target columns:
         {json.dumps(tgt_cols, indent=2)}
 
-        Generate an STTM JSON with entries like this:
+        Generate an STTM JSON with entries like this for simple table:
         {{
             "target_column": "<column_name_in_target>",
             "source_columns": ["col1", "col2", ...],
-            "transformation": "<expression or null>"
+            "transformation": "<expression or null>",
+            "pkey" : "<Primary Keys for the target table>"
         }}
+
+        Generate an STTM JSON with entries like this for complex table that need joins:
+        
+        {{
+            "target_column": "product_name",
+            "pkey" : "<Primary Keys for the target table>",
+            "source_tables": [
+        {{
+            "schema": "ref",
+            "table": "product_master",
+            "join_type": "inner",
+            "join_logic": "stg.sales_txn.product_id = ref.product_master.product_id"
+        }}
+        ],
+            "source_columns": ["product_id"],
+            "transformation": "<expression or null>"
+            
+            
+        }}
+        
 
         Rules:
         - Map only columns present in the target list.
-        - Use similar names for direct mappings (case-insensitive) except fou audit columns.
+        - Use similar names for direct mappings (case-insensitive) except for audit columns.
         - For audit fields like 'audit_insrt_dt', 'audit_updt_dt', 'load_ts', use CURRENT_TIMESTAMP.
+        - If you use more than one table, include the "source_tables" field in the mapping like this:
+        - If join is needed, specify both lookup_table and join_logic
         - Output must be valid JSON (list of mappings).
         -INT schema tables are always SCD1 for dimensions
         -DWH Schema tables are always SCD2 for dimensions.
         -Process_ind in the INT Schema will be I for new records & U for updated records & D for deleted records.
         -When the source schema is INT and target schema is DWH pick up records which have processind in I and U.
+        -When looking up records from DWH always use the filter IS_ACTIVE='Y'
+        -When looking up records from INT always use the filter PROCESS_IND in ('I','U')
         -DWH tables will have is_active column which is a flag .Its set to Y for currently active records and N for inactive records.
         -EFF_START_DT & EFF_END_DT are the dates in between which the records were active/currently active.
+        -Provide the Primary_key details as well by profiling if needed.
 
         """)
     ]
@@ -101,6 +135,7 @@ def generate_sttm_node(state):
     valid_tgt_cols = set(tgt_cols)
     filtered_sttm = [m for m in sttm if m.get("target_column") in valid_tgt_cols]
 
+    ##print(filtered_sttm)
     state["sttm"] = {
         "source_schema": src_schema,
         "source_table": src_table,
@@ -125,6 +160,8 @@ def codegen_node_func(state, preview=False):
     sttm = state.get("sttm", {})
     etl_engine = state.get("etl_engine", "Pandas")
     load_type = state.get("load_type", "Full")
+    scd_type =state.get("scd_type",'NA')
+    
 
     src_schema = sttm.get("source_schema")
     src_table = sttm.get("source_table")
@@ -147,16 +184,62 @@ def codegen_node_func(state, preview=False):
     Generate a clean Python function using pandas that:
     - Reads from table {src_schema}.{src_table}
     - Applies transformations from this STTM: {sttm_json}
+    - If there are joins referring to other table in STTM , ensure to read those as well to apply those transformations.
     - Writes to table {tgt_schema}.{tgt_table}
     - Only use these source columns: {src_columns}
     - Only use these target columns: {tgt_columns}
     - Load type is: {load_type}
+    - Primary key is present in STTM as pkey
     - Use datetime.now() for current_timestamp if needed.
     - No placeholders or mock data.
     - Func_name is {func_name}
+    -Use the scd_type value in {scd_type} to generate code for Dimensions.
     -Use the .env file to create database connection.
+    -Apply the following logic :
+        -If load type is incremental and scd type is SCD1 apply insert else update to the table based on primary key defined as pkey.
+        -If load type is full and scd type is SCD1  apply truncate and load to the table .
+        -If load type is incremental or full and scd type is SCD2 apply insert and  update to the table based on primary key.Also  end date the previous records and mark them inactive
+    -Make sure to add single quote data values in sql where clauses 
+    -All dynamically executed SQL statements must use sqlalchemy.text() with parameterized values.”
 
-    Output only valid executable Python code.
+    ### Safe SQL Execution (Critical)
+    - All SQL statements (INSERT, UPDATE, DELETE, TRUNCATE) **must** be executed using:
+        from sqlalchemy import text
+        conn.execute(text(sql), parameters_dict)
+    - Do **not** execute plain strings directly with conn.execute().
+    - Use parameterized queries with placeholders (e.g. :brand_id, :brand_name) instead of string concatenation.
+    - If multiple rows are inserted, use pandas to_sql() where possible, or loop efficiently.
+    -Create code as per the load type. Dont pass any paramters to the function call.
+    -Dont assume scd type and load type.Its available as {scd_type} and {load_type}
+
+    ###Code sql
+    When generating ETL or data ingestion scripts that update records in a database:
+    - Always use `with engine.begin() as conn:` for transactional operations.
+    - Never use `with engine.connect()` without explicitly committing, since SQLAlchemy 2.x does not auto-commit.
+    - Make sure that inserts done with pandas `.to_sql()` and manual updates both persist consistently.
+    - Include meaningful print/log messages after inserts or updates.
+    - Avoid looping through each row to run individual UPDATE statements.
+    - Instead, generate a single bulk UPDATE using a temporary staging table or CTE join pattern.
+    - Example approach:
+    1. Write updated data into a temporary table (like `#tmp_brand_master` or a temp schema).
+    2. Run a single SQL statement such as:
+
+        ```sql
+        UPDATE target_table
+        SET col1 = src.col1,
+            col2 = src.col2,
+            audit_updt_dt = CURRENT_TIMESTAMP
+        FROM int.brand_master AS target
+        JOIN tmp_brand_master AS src
+        ON target.brand_id = src.brand_id;
+        ```
+
+    ### Performance
+    - Never query inside a per-row loop.
+    - If you need to check for existing keys (e.g., brand_id), fetch all keys from the target table once and compare in-memory.
+
+
+    Output only valid executable Python code & call the code.
     """
 
     response = llm.invoke([

@@ -23,8 +23,8 @@ from graph.codegen_flow import generate_sttm_node, codegen_node_func
 # ---------------------------------------------
 # Streamlit UI Setup
 # ---------------------------------------------
-st.set_page_config(page_title="CodeFlow AI", layout="wide")
-st.title("💬 CodeFlow AI")
+st.set_page_config(page_title="CodeFlow.AI", layout="wide")
+st.title("💬 CodeFlow.AI")
 
 # ---------------------------------------------
 # Initialize session state
