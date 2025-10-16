@@ -16,7 +16,8 @@ from utils.db import (
     preview_table,
     get_existing_code,
     save_generated_code,
-    get_engine
+    get_engine,
+    create_table_in_db
 )
 from graph.codegen_flow import generate_sttm_node, codegen_node_func
 
@@ -78,8 +79,63 @@ with st.expander("Step 1: Select Source & Target Tables", expanded=True):
     source_tables = list_tables(source_schema)
     target_tables = list_tables(target_schema)
 
-    source_table = st.selectbox("Source Table", source_tables)
-    target_table = st.selectbox("Target Table", target_tables)
+    source_table = st.selectbox("Select Source Table", ["<Create New Table>"] + source_tables)
+    if source_table == "<Create New Table>":
+        st.info("Define SQL for new table creation below:")
+
+        default_sql = f"""
+    CREATE TABLE {target_schema}.new_table_name (
+        id SERIAL PRIMARY KEY,
+        column1 TEXT,
+        column2 INTEGER,
+        audit_insrt_dt TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        audit_updt_dt TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    """
+        create_sql = st.text_area("Enter SOURCE CREATE TABLE SQL:", value=default_sql, height=200)
+
+        if st.button("Execute Source Create Table"):
+            try:
+                create_table_in_db(create_sql)
+                st.success("✅ Table created successfully!")
+                
+                # Optional: Log the creation event
+                #log_table_creation(selected_schema, "new_table_name", create_sql)
+
+                st.rerun()
+            except Exception as e:
+                st.error(f"❌ Failed to create table: {e}")
+    else:
+        st.success(f"Selected existing table: {source_schema}.{source_table}")
+    
+    target_table = st.selectbox("Select Target Table", ["<Create New Table>"] + target_tables)
+    if target_table == "<Create New Table>":
+        st.info("Define SQL for new table creation below:")
+
+        default_sql = f"""
+    CREATE TABLE {target_schema}.new_table_name (
+        id SERIAL PRIMARY KEY,
+        column1 TEXT,
+        column2 INTEGER,
+        audit_insrt_dt TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        audit_updt_dt TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    """
+        create_sql = st.text_area("Enter TARGET CREATE TABLE SQL:", value=default_sql, height=200)
+
+        if st.button("Execute Target Create Table"):
+            try:
+                create_table_in_db(create_sql)
+                st.success("✅ Table created successfully!")
+                
+                # Optional: Log the creation event
+                #log_table_creation(selected_schema, "new_table_name", create_sql)
+
+                st.rerun()
+            except Exception as e:
+                st.error(f"❌ Failed to create table: {e}")
+    else:
+        st.success(f"Selected existing table: {target_schema}.{target_table}")
 
     load_type = st.selectbox("Load Type", ["Full", "Incremental"])
     st.session_state.load_type = load_type

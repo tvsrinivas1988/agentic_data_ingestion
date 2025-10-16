@@ -1,6 +1,6 @@
 import os
 import pandas as pd
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, text,exc
 from dotenv import load_dotenv
 import psycopg2
 
@@ -215,3 +215,20 @@ def save_generated_code(engine, src_schema, tgt_schema,source_table, tgt_table, 
             "scd_type":scd_type,
             "etl_engine":etl_engine
         })
+
+def create_table_in_db(create_sql: str):
+    """
+    Executes a CREATE TABLE SQL statement safely.
+    Args:
+        create_sql (str): The CREATE TABLE SQL statement.
+    Raises:
+        Exception: If the SQL execution fails.
+    """
+    engine = get_engine()
+    if not create_sql.strip().lower().startswith("create table"):
+        raise ValueError("Only CREATE TABLE statements are allowed.")
+    try:
+        with engine.begin() as conn:
+            conn.execute(text(create_sql))
+    except exc.SQLAlchemyError as e:
+        raise Exception(f"Database error: {e}")

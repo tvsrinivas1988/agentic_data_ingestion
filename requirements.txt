@@ -21,3 +21,5 @@ asttokens>=2.4.1   # helps AST parsing for validation
 rich>=13.7.1
 
 graphviz
+ipykernel
+langchain_groq

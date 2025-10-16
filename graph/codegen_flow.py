@@ -17,6 +17,7 @@ from langchain.schema import SystemMessage, HumanMessage
 import json
 
 from langchain_openai import ChatOpenAI
+from langchain_groq import ChatGroq
 from langchain.schema import SystemMessage, HumanMessage
 import json
 from utils.db import get_table_columns  # <-- make sure this exists in your utils.db
@@ -44,8 +45,8 @@ def generate_sttm_node(state):
     all_schemas = {s: list_tables(s) for s in list_schemas()}
 
     # Build LLM model
-    model = ChatOpenAI(model="gpt-4o-mini", temperature=0.2,api_key=os.getenv('OPENAI_API_KEY'))
-
+    #model = ChatOpenAI(model="gpt-4o-mini", temperature=0.2,api_key=os.getenv('OPENAI_API_KEY'))
+    model = ChatGroq(model="llama-3.3-70b-versatile",  temperature=0.1)
     # Strict instruction to use only target columns
     messages = [
         SystemMessage(content=(
@@ -109,7 +110,7 @@ def generate_sttm_node(state):
         - Output must be valid JSON (list of mappings).
         -INT schema tables are always SCD1 for dimensions
         -DWH Schema tables are always SCD2 for dimensions.
-        -Process_ind in the INT Schema will be I for new records & U for updated records & D for deleted records.
+        -Process_ind in the INT Schema will be I for new records that are not already present in Target & U for  records already present in target & D for deleted records.
         -When the source schema is INT and target schema is DWH pick up records which have processind in I and U.
         -When looking up records from DWH always use the filter IS_ACTIVE='Y'
         -When looking up records from INT always use the filter PROCESS_IND in ('I','U')
@@ -171,7 +172,8 @@ def codegen_node_func(state, preview=False):
     func_name = f"{src_schema}_{tgt_schema}_{tgt_table}".lower()
 
     # ---- 🧠 Use the LLM to generate transformation logic dynamically ----
-    llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.1)
+    #llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.0)
+    llm = ChatGroq(model="openai/gpt-oss-20b",  temperature=0.1)
 
     # Make sure we use *actual* source & target columns from DB (avoid hallucination)
     src_columns = state.get("source_columns", [])
@@ -180,51 +182,74 @@ def codegen_node_func(state, preview=False):
     sttm_json = json.dumps(sttm, indent=2)
 
     prompt = f"""
-    You are a precise ETL code generator.
-    Generate a clean Python function using pandas that:
-    - Reads from table {src_schema}.{src_table}
-    - Applies transformations from this STTM: {sttm_json}
-    - If there are joins referring to other table in STTM , ensure to read those as well to apply those transformations.
-    - Writes to table {tgt_schema}.{tgt_table}
-    - Only use these source columns: {src_columns}
-    - Only use these target columns: {tgt_columns}
-    - Load type is: {load_type}
-    - Process_ind should be derived based on the rule  and assumed.
-    - Primary key is present in STTM as pkey
-    - Use datetime.now() for current_timestamp if needed.
-    - No placeholders or mock data.
-    - Func_name is {func_name}
-    -Use the scd_type value in {scd_type} to generate code for Dimensions.
-    -Use the .env file to create database connection.
-    -Apply the following logic :
-        -If load type is incremental and scd type is SCD1 apply insert else update to the table based on primary key defined as pkey.
-        -If load type is full and scd type is SCD1  apply truncate and load to the table .
-        -If load type is incremental or full and scd type is SCD2 apply insert and  update to the table based on primary key.Also  end date the previous records and mark them inactive
-    -Make sure to add single quote data values in sql where clauses 
-    -All dynamically executed SQL statements must use sqlalchemy.text() with parameterized values.”
+   You are a precise production ETL code generator. Generate a single, valid, executable Python function (no extra text) that performs the following ETL behavior. Output only the Python code and call the function at the end.
 
-    ### Safe SQL Execution (Critical)
-    - All SQL statements (INSERT, UPDATE, DELETE, TRUNCATE) **must** be executed using:
-        from sqlalchemy import text
-        conn.execute(text(sql), parameters_dict)
-    - Do **not** execute plain strings directly with conn.execute().
-    - Use parameterized queries with placeholders (e.g. :brand_id, :brand_name) instead of string concatenation.
-    - If multiple rows are inserted, use pandas to_sql() where possible, or loop efficiently.
-    -Create code as per the load type. Dont pass any paramters to the function call.
-    -Dont assume scd type and load type.Its available as {scd_type} and {load_type}
+### FUNCTION & CONNECTION
+- Function name: {func_name}()
+- No parameters required.
+- Use .env for DB connection: load with `load_dotenv()` and create SQLAlchemy engine with `create_engine(os.getenv("DATABASE_URL"))`.
+- Always use fully-qualified schema.table names.
 
-    ###Code sql
-    When generating ETL or data ingestion scripts that update records in a database:
-    - Always use `with engine.begin() as conn:` for transactional operations.
-    - Never use `with engine.connect()` without explicitly committing, since SQLAlchemy 2.x does not auto-commit.
-    - Make sure that inserts done with pandas `.to_sql()` and manual updates both persist consistently.
-    
-    ### Performance
-    - Never query inside a per-row loop.
-    - If you need to check for existing keys (e.g., brand_id), fetch all keys from the target table once and compare in-memory.
+### INPUTS (to be provided)
+- Source table: {src_schema}.{src_table}
+- Target table: {tgt_schema}.{tgt_table}
+- STTM JSON: {sttm_json}
+- Source columns allowed: {src_columns}
+- Target columns allowed: {tgt_columns}
+- Primary key(s) in STTM: "pkey" (single column or JSON list)
+- Load type: {load_type} ("full" or "incremental")
+- SCD type: {scd_type} ("SCD1" or "SCD2")
+
+### TRANSFORMATION RULES
+- Apply STTM transformations to source dataframe, including any joins:
+  - Read all joined tables fully into pandas using explicit schema.table.
+  - Perform merges with explicit suffixes (_src, _ref).
+  - Rename columns after merge to match target schema.
+  - Drop unmapped columns before writing to target.
+- Only use columns from {src_columns} to derive values.
+- Only write columns in {tgt_columns} to target.
+- Do not map extra source columns.
+
+### PROCESS_IND LOGIC
+- Determine PROCESS_IND for each row:
+  1. Identify primary key(s) from STTM.
+  2. Incremental load: if key exists in target → 'U', else → 'I'.
+  3. Full load: if key exists in target → 'U', if not in target → 'I', if missing in source → 'D' (SCD1 only).
+
+### SCD & LOAD RULES
+- SCD1 + full: truncate target → insert all source rows.
+- SCD1 + incremental: insert new rows, update existing in-place including PROCESS_IND.
+- SCD2: insert new rows for changed matches, end-date previous rows; do not update historical columns.
+- Always set audit fields:
+  - audit_insrt_dt, audit_updt_dt = datetime.now()
+  - audit_batch_id = unique per run
+  - audit_insrt_nm / audit_updt_nm = consistent process name
+
+### SAFETY & PERFORMANCE RULES
+- Never run SELECT inside a per-row loop.
+- Use `sqlalchemy.text()` with parameter dicts.
+- Use `with engine.begin() as conn:` for all DML.
+- Bulk inserts: `pandas.to_sql()` single call.
+- Bulk updates: prefer join-based UPDATE or staging table approach. Create temp tables in local schema . Dont prefix any specific schema.
+- For unavoidable per-row updates, use engine.begin().
+- Validate target columns: raise error if missing or extra.
+
+### COLUMN HANDLING
+- Only these target columns are allowed: {json.dumps(tgt_columns)}
+- Ensure final DataFrame exactly matches target schema.
+- Drop unmapped columns after join/merge.
+- Handle joins safely with suffixes and renaming.
+
+#### CODE GUIDELINES
+- If using pandas read_sql_tables , remember it uses two parameters for  schema and table name .
+
+### OUTPUT & INVOCATION
+- Output only valid Python code.
+- Call the function at the end to execute.
+- Handle empty target tables gracefully.
+- Use fully-qualified schema.table everywhere.
 
 
-    Output only valid executable Python code & call the code.
     """
 
     response = llm.invoke([
